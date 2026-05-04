@@ -1,0 +1,39 @@
+# RANKIGI Proxy Interceptor — local deployment.
+#
+# `network_mode: host` is required so the proxy is reachable at
+# localhost:RANKIGI_PROXY_PORT from the agent process and so outbound calls
+# to the RANKIGI ingest endpoint use the host's network without bridge
+# rewrites. On macOS host mode is supported only by Docker Desktop 4.34+.
+
+services:
+  rankigi-proxy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: rankigi-proxy:0.1.0
+    container_name: rankigi-proxy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      RANKIGI_PROXY_PORT: "${RANKIGI_PROXY_PORT:-8080}"
+      RANKIGI_INGEST_URL: "${RANKIGI_INGEST_URL}"
+      RANKIGI_API_KEY: "${RANKIGI_API_KEY}"
+      RANKIGI_AGENT_ID: "${RANKIGI_AGENT_ID}"
+      RANKIGI_ORG_ID: "${RANKIGI_ORG_ID}"
+      RANKIGI_BUFFER_SIZE: "${RANKIGI_BUFFER_SIZE:-1000}"
+      RANKIGI_INGEST_TIMEOUT_MS: "${RANKIGI_INGEST_TIMEOUT_MS:-5000}"
+      RANKIGI_PASSPORT_KEY: "${RANKIGI_PASSPORT_KEY:-}"
+      RANKIGI_PASSPORT_ID: "${RANKIGI_PASSPORT_ID:-}"
+      RANKIGI_SEAL_EVAL_ENABLED: "${RANKIGI_SEAL_EVAL_ENABLED:-false}"
+      CA_CERT_PATH: "/data/rankigi-ca.crt"
+      CA_KEY_PATH: "/data/rankigi-ca.key"
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      - rankigi-ca:/data
+    read_only: true
+    cap_drop:
+      - ALL
+
+volumes:
+  rankigi-ca:
+    name: rankigi-proxy-ca
