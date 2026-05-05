@@ -1,0 +1,121 @@
+name: proxy-release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: rankigi-proxy-linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            cross: true
+          - asset: rankigi-proxy-linux-aarch64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            cross: true
+          - asset: rankigi-proxy-darwin-aarch64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            cross: false
+          - asset: rankigi-proxy-darwin-x86_64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.target }}-
+
+      - name: Install zig (Linux cross-compile)
+        if: matrix.cross == true
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.cross == true
+        run: cargo install cargo-zigbuild --locked --version "^0.19"
+
+      - name: Build (cross via cargo-zigbuild)
+        if: matrix.cross == true
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: matrix.cross == false
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage and rename binary
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp "target/${{ matrix.target }}/release/rankigi-proxy" \
+             "artifacts/${{ matrix.asset }}"
+          if command -v strip >/dev/null 2>&1; then
+            strip "artifacts/${{ matrix.asset }}" || true
+          fi
+          chmod +x "artifacts/${{ matrix.asset }}"
+          ls -la artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: artifacts/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: github release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -la artifacts/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/rankigi-proxy-linux-x86_64
+            artifacts/rankigi-proxy-linux-aarch64
+            artifacts/rankigi-proxy-darwin-aarch64
+            artifacts/rankigi-proxy-darwin-x86_64
+          generate_release_notes: true
+          fail_on_unmatched_files: true

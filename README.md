@@ -1,7 +1,37 @@
 # RANKIGI Proxy Interceptor
 
-A standalone Rust proxy that captures AI agent HTTP traffic and submits
-tamper-evident chain events to RANKIGI without any agent code changes.
+The open source proxy component of the RANKIGI execution proof layer.
+
+The proxy intercepts outbound HTTP and HTTPS traffic from AI agents and
+submits tamper-evident chain events to the RANKIGI ingest endpoint. No
+agent code changes required.
+
+## Quick start
+
+```sh
+curl -sSf https://rankigi.com/install | sh
+```
+
+## Managed service
+
+The proxy ships with `proof_provider=rankigi.com` by default. Get your
+API key at: [app.rankigi.com/dashboard/keys](https://app.rankigi.com/dashboard/keys)
+
+## Self-hosting
+
+The proxy can submit to any RANKIGI-compatible ingest endpoint by
+setting `RANKIGI_INGEST_URL`.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
+
+## Standard
+
+The wire schema follows the open KYA standard:
+[github.com/kya-standard/spec](https://github.com/kya-standard/spec)
+
+---
 
 ## How it works
 
@@ -16,7 +46,7 @@ or HTTPS request the proxy:
    event to the RANKIGI ingest endpoint.
 
 The chain write happens entirely off the agent's hot path. If the RANKIGI
-ingest endpoint is unreachable, the agent continues executing — gaps are
+ingest endpoint is unreachable, the agent continues executing - gaps are
 recorded in the chain when connectivity is restored.
 
 The agent never reports anything. The agent cannot lie about what happened
@@ -33,7 +63,7 @@ because it is never asked.
 - ⚠ Seal evaluation is implemented client-side but **disabled by default**
   (`RANKIGI_SEAL_EVAL_ENABLED=false`) because the
   `/api/seal/evaluate` endpoint does not exist on the server yet.
-- ⚠ No HTTP/2 to the agent — the proxy speaks HTTP/1.1 only on the inbound
+- ⚠ No HTTP/2 to the agent - the proxy speaks HTTP/1.1 only on the inbound
   side. Most agent SDKs negotiate HTTP/1.1 to a proxy by default.
 
 ## Setup
@@ -65,15 +95,15 @@ trust this cert (see "Agent configuration" below).
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `RANKIGI_PROXY_PORT` | no | `8080` | TCP port the proxy listens on. |
-| `RANKIGI_INGEST_URL` | yes | — | Base URL of the RANKIGI deployment, e.g. `https://rankigi.com`. |
-| `RANKIGI_API_KEY` | yes | — | Ingest API key (`rnk_<hex>` or bare hex). Sent as `Authorization: Bearer`. |
-| `RANKIGI_AGENT_ID` | yes | — | UUID of the agent being proxied. Must be registered for the org. |
-| `RANKIGI_ORG_ID` | yes | — | UUID of the org. (Server derives org from the API key, but the proxy logs both.) |
+| `RANKIGI_INGEST_URL` | yes | - | Base URL of the RANKIGI deployment, e.g. `https://rankigi.com`. |
+| `RANKIGI_API_KEY` | yes | - | Ingest API key (`rnk_<hex>` or bare hex). Sent as `Authorization: Bearer`. |
+| `RANKIGI_AGENT_ID` | yes | - | UUID of the agent being proxied. Must be registered for the org. |
+| `RANKIGI_ORG_ID` | yes | - | UUID of the org. (Server derives org from the API key, but the proxy logs both.) |
 | `RANKIGI_BUFFER_SIZE` | no | `1000` | Max queued events before fail-open dropping kicks in. |
 | `RANKIGI_INGEST_TIMEOUT_MS` | no | `5000` | Per-request timeout for ingest submission. |
 | `RANKIGI_PASSPORT_KEY` | no | unset | Base64 PKCS8 Ed25519 private key. If set the proxy signs every event. |
 | `RANKIGI_PASSPORT_ID` | no | unset | UUID of the passport corresponding to `RANKIGI_PASSPORT_KEY`. |
-| `RANKIGI_SEAL_EVAL_ENABLED` | no | `false` | Toggle seal evaluation. Off by default — endpoint not yet deployed. |
+| `RANKIGI_SEAL_EVAL_ENABLED` | no | `false` | Toggle seal evaluation. Off by default - endpoint not yet deployed. |
 | `RANKIGI_SEAL_EVAL_TIMEOUT_MS` | no | `20` | Maximum wait for a seal verdict before falling open. |
 | `CA_CERT_PATH` | no | `rankigi-ca.crt` | Where the root CA cert is persisted. |
 | `CA_KEY_PATH` | no | `rankigi-ca.key` | Where the root CA private key is persisted. |
@@ -101,7 +131,7 @@ export NODE_EXTRA_CA_CERTS=/abs/path/to/rankigi-ca.crt
 ```
 
 If your client uses `undici` directly you may also need to construct a
-proxy agent — most LLM SDKs (`openai`, `@anthropic-ai/sdk`) honor
+proxy agent - most LLM SDKs (`openai`, `@anthropic-ai/sdk`) honor
 `HTTPS_PROXY` automatically.
 
 ### Shell (curl, wget)
@@ -120,7 +150,7 @@ curl -x http://localhost:8080 https://api.openai.com/v1/models -H "Authorization
 The request should succeed and a corresponding `llm.openai.*` event should
 appear in your RANKIGI dashboard.
 
-## Failure behavior — fail open, always
+## Failure behavior - fail open, always
 
 | Failure | Behavior |
 |---|---|
@@ -136,7 +166,7 @@ appear in your RANKIGI dashboard.
 **The proxy holds the agent's private passport key when signing is
 enabled.** This is a deliberate v1 tradeoff. Holding the key in-process
 means the proxy can produce signed events that look identical to events
-the SDK would have produced — letting the proxy stand in for the SDK
+the SDK would have produced - letting the proxy stand in for the SDK
 transparently. It also means: anyone with read access to
 `RANKIGI_PASSPORT_KEY` (env var, container filesystem, process memory)
 can forge events for the proxied agent.
@@ -205,7 +235,7 @@ cargo fmt --check
 cargo audit
 ```
 
-The most important test is `canonical_json_matches_typescript` — it
+The most important test is `canonical_json_matches_typescript` - it
 verifies that the Rust canonical JSON output is byte-for-byte identical
 to the Node SDK's. If that test fails the proxy and the SDK no longer
 agree on chain hashes and the verifier will reject proxy-captured events.
