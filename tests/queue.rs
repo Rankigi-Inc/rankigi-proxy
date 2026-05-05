@@ -28,6 +28,7 @@ fn cfg(ingest_url: &str, buffer_size: usize) -> Arc<Config> {
         passport_id: None,
         seal_eval_enabled: false,
         seal_eval_timeout_ms: 20,
+        bypass_hosts: Vec::new(),
     })
 }
 
