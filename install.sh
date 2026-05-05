@@ -102,6 +102,12 @@ fi
 info "Installing to ${BIN_DEST}..."
 sudo_run install -m 0755 "$tmp_bin" "$BIN_DEST"
 
+# Remove macOS quarantine flag so Gatekeeper does not block execution of
+# the unsigned binary on first run.
+if [ "$os" = "darwin" ]; then
+  sudo_run xattr -d com.apple.quarantine "$BIN_DEST" 2>/dev/null || true
+fi
+
 # ---------------------------------------------------------------------------
 # 3. Generate CA cert
 # ---------------------------------------------------------------------------
@@ -190,6 +196,22 @@ cat <<'BOX'
 |                                                |
 +------------------------------------------------+
 BOX
+
+if [ "$os" = "darwin" ]; then
+  cat <<'MACNOTE'
+
++------------------------------------------------+
+|  macOS note: unsigned binaries can be blocked  |
+|  by Gatekeeper. The installer ran:             |
+|                                                |
+|    xattr -d com.apple.quarantine \             |
+|      /usr/local/bin/rankigi-proxy              |
+|                                                |
+|  If launching the proxy is still blocked, run  |
+|  the command above manually.                   |
++------------------------------------------------+
+MACNOTE
+fi
 
 if [ -n "$ipv6_warning" ]; then
   cat <<'WARN'
