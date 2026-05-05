@@ -21,6 +21,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
+#[cfg(target_os = "linux")]
+use std::os::unix::io::AsRawFd;
+
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024; // 4 MB
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
@@ -69,6 +72,21 @@ impl ProxyServer {
     }
 
     async fn handle_conn(&self, mut stream: TcpStream) -> Result<(), String> {
+        // Transparent mode: iptables REDIRECTs port 443 traffic to us, so the
+        // first byte on the wire is a raw TLS handshake (0x16) rather than an
+        // HTTP CONNECT or plain HTTP request line. Detect that case by
+        // peeking one byte before any HTTP parsing.
+        if self.cfg.transparent_mode {
+            let mut peek = [0u8; 1];
+            match stream.peek(&mut peek).await {
+                Ok(n) if n > 0 && peek[0] == 0x16 => {
+                    return self.handle_transparent_tls(stream).await;
+                }
+                Ok(_) => {} // fall through to HTTP handling
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+
         // Peek the first request to decide between CONNECT-MITM and plain HTTP.
         let mut buf = Vec::with_capacity(8192);
         if !read_until_headers_end(&mut stream, &mut buf).await? {
@@ -80,6 +98,38 @@ impl ProxyServer {
         } else {
             self.handle_plain(stream, head, buf).await
         }
+    }
+
+    /// Handle a raw TLS connection redirected to us by iptables. We recover
+    /// the original destination via `SO_ORIGINAL_DST` and the hostname via
+    /// reverse DNS so that the leaf cert presented for SNI matches what the
+    /// agent's TLS client expects.
+    async fn handle_transparent_tls(&self, stream: TcpStream) -> Result<(), String> {
+        let orig = original_dst(&stream).map_err(|e| format!("SO_ORIGINAL_DST: {}", e))?;
+        let ip = orig.ip();
+        let port = orig.port();
+        let hostname = reverse_dns(ip).await.unwrap_or_else(|| ip.to_string());
+        debug!(host = %hostname, ip = %ip, port, "transparent: intercepted TLS");
+
+        // Bypass hosts (e.g. ingest endpoint) tunnel through to the original
+        // IP without MITM so the proxy never records its own traffic.
+        if self.cfg.is_bypassed(&hostname) {
+            let mut s = stream;
+            let mut up = TcpStream::connect((ip, port))
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;
+            return Ok(());
+        }
+
+        let server_cfg = self
+            .leaf_cache
+            .server_config_for(&hostname)
+            .await
+            .map_err(|e| e.to_string())?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(server_cfg);
+        let inbound_tls = acceptor.accept(stream).await.map_err(|e| e.to_string())?;
+        self.serve_inner_https(inbound_tls, hostname, port).await
     }
 
     async fn handle_connect(&self, mut stream: TcpStream, head: RequestHead) -> Result<(), String> {
@@ -562,6 +612,50 @@ fn is_hop_by_hop(name: &str) -> bool {
             | "upgrade"
             | "host"
     )
+}
+
+// ── Transparent-mode helpers ────────────────────────────────────────────────
+
+/// Recover the pre-redirect destination of a connection that was rewritten
+/// by `iptables -j REDIRECT`. Linux exposes the original 4-tuple via the
+/// `SO_ORIGINAL_DST` socket option on `SOL_IP`.
+#[cfg(target_os = "linux")]
+fn original_dst(stream: &TcpStream) -> std::io::Result<std::net::SocketAddr> {
+    let fd = stream.as_raw_fd();
+    unsafe {
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        let ret = libc::getsockopt(
+            fd,
+            libc::SOL_IP,
+            libc::SO_ORIGINAL_DST,
+            &mut addr as *mut _ as *mut libc::c_void,
+            &mut len,
+        );
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let ip = std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+        let port = u16::from_be(addr.sin_port);
+        Ok(std::net::SocketAddr::new(std::net::IpAddr::V4(ip), port))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn original_dst(_stream: &TcpStream) -> std::io::Result<std::net::SocketAddr> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "SO_ORIGINAL_DST is only available on Linux",
+    ))
+}
+
+/// Reverse-resolve an IP to a hostname for use as the leaf cert SNI. Best
+/// effort — callers fall back to the IP literal when this returns `None`.
+async fn reverse_dns(ip: std::net::IpAddr) -> Option<String> {
+    tokio::task::spawn_blocking(move || dns_lookup::lookup_addr(&ip).ok())
+        .await
+        .ok()
+        .flatten()
 }
 
 fn is_keepalive(head: &RequestHead) -> bool {

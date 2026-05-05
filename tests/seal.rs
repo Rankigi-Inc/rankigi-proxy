@@ -27,6 +27,7 @@ fn cfg(ingest_url: &str, enabled: bool, timeout_ms: u64) -> Arc<Config> {
         seal_eval_enabled: enabled,
         seal_eval_timeout_ms: timeout_ms,
         bypass_hosts: Vec::new(),
+        transparent_mode: false,
     })
 }
 

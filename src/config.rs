@@ -38,6 +38,11 @@ pub struct Config {
     /// ingest → capture loop). Users can extend this list via
     /// `RANKIGI_BYPASS_HOSTS` (comma-separated).
     pub bypass_hosts: Vec<String>,
+    /// When true, the proxy expects iptables-redirected raw TLS connections
+    /// on its listen port. The original destination is recovered via
+    /// `SO_ORIGINAL_DST` (Linux only) and the hostname via reverse DNS.
+    /// Agents do NOT need `HTTPS_PROXY` set in this mode.
+    pub transparent_mode: bool,
 }
 
 impl Config {
@@ -61,6 +66,7 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty());
         let seal_eval_enabled = parse_env_or("RANKIGI_SEAL_EVAL_ENABLED", false)?;
+        let transparent_mode = parse_env_or("RANKIGI_TRANSPARENT_MODE", false)?;
         let seal_eval_timeout_ms = parse_env_or("RANKIGI_SEAL_EVAL_TIMEOUT_MS", 20u64)?;
 
         // Bypass list: always includes the ingest URL host so the proxy
@@ -97,6 +103,7 @@ impl Config {
             seal_eval_enabled,
             seal_eval_timeout_ms,
             bypass_hosts,
+            transparent_mode,
         })
     }
 
