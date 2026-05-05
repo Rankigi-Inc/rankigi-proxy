@@ -1,10 +1,28 @@
 use rankigi_proxy::{config::Config, proxy::ProxyServer, queue, signing::PassportSigner, tls};
+use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = env::args().collect();
+    if args.iter().any(|a| a == "--generate-ca-only") {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        return generate_ca_only();
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("rankigi-proxy {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -83,4 +101,41 @@ async fn shutdown_signal() {
 #[cfg(not(unix))]
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// `--generate-ca-only`: load or generate the local root CA and exit.
+/// Used by install.sh so the CA can be created and trusted before the
+/// proxy is run with full RANKIGI credentials.
+fn generate_ca_only() -> anyhow::Result<()> {
+    let cert_path = PathBuf::from(
+        env::var("CA_CERT_PATH").unwrap_or_else(|_| "rankigi-ca.crt".to_string()),
+    );
+    let key_path = PathBuf::from(
+        env::var("CA_KEY_PATH").unwrap_or_else(|_| "rankigi-ca.key".to_string()),
+    );
+    let _ca = tls::RootCa::load_or_generate(&cert_path, &key_path)?;
+    println!("CA cert written to: {}", cert_path.display());
+    println!("CA key  written to: {}", key_path.display());
+    Ok(())
+}
+
+fn print_help() {
+    println!(
+        "rankigi-proxy {}\n\
+        \n\
+        USAGE:\n    \
+        rankigi-proxy [FLAGS]\n\
+        \n\
+        FLAGS:\n    \
+        --generate-ca-only    Generate the local root CA at CA_CERT_PATH /\n                          \
+        CA_KEY_PATH and exit. Defaults: ./rankigi-ca.crt\n                          \
+        and ./rankigi-ca.key.\n    \
+        --help, -h            Print this message.\n    \
+        --version, -V         Print the version.\n\
+        \n\
+        Without flags the proxy reads its full configuration from the\n\
+        environment (RANKIGI_INGEST_URL, RANKIGI_API_KEY, RANKIGI_AGENT_ID,\n\
+        RANKIGI_ORG_ID) and starts the listener on RANKIGI_PROXY_PORT (8080).",
+        env!("CARGO_PKG_VERSION")
+    );
 }
