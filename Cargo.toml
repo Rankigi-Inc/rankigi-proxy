@@ -3,7 +3,7 @@ name = "rankigi-proxy"
 version = "0.1.0"
 edition = "2021"
 description = "RANKIGI Universal Proxy Interceptor — captures AI agent HTTP traffic and submits tamper-evident chain events without agent code changes."
-license = "Apache-2.0"
+license = "MIT"
 
 [[bin]]
 name = "rankigi-proxy"

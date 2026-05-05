@@ -151,7 +151,7 @@ Mitigations in this release:
   and never written to disk.
 
 If you cannot accept these tradeoffs, leave `RANKIGI_PASSPORT_KEY`
-unset. Events will be submitted as ungoverned and the server will tag
+unset. Events will be submitted unsigned and the server will tag
 them `data_quality_flag="unverified"`. Honest about the trust boundary.
 
 A future release will introduce a dedicated server-side proxy-passport

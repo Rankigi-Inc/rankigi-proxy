@@ -14,7 +14,7 @@ set -eu
 # Configuration
 # ---------------------------------------------------------------------------
 
-REPO="Rankigi-Inc/rankigi-core"
+REPO="Rankigi-Inc/rankigi-proxy"
 BIN_NAME="rankigi-proxy"
 BIN_DEST="/usr/local/bin/${BIN_NAME}"
 
