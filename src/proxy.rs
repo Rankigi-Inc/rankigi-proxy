@@ -86,6 +86,24 @@ impl ProxyServer {
         // CONNECT host:port HTTP/1.1
         let target = head.target.clone();
         let (host, port) = parse_authority(&target).ok_or("bad CONNECT target")?;
+
+        // Bypass: tunnel transparently to upstream without MITM or capture.
+        // Used for the ingest endpoint itself so the proxy cannot record its
+        // own submissions (capture → ingest → capture loop), plus any hosts
+        // the operator opts into via RANKIGI_BYPASS_HOSTS.
+        if self.cfg.is_bypassed(&host) {
+            debug!(host = %host, port, "bypass: tunneling without capture");
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut upstream = TcpStream::connect((host.as_str(), port))
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+            return Ok(());
+        }
+
         // 200 to signal tunnel established.
         stream
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -201,6 +219,20 @@ impl ProxyServer {
             host_with_port(&host, port, &scheme),
             path
         );
+
+        // Bypass: forward to upstream and relay the response without
+        // enqueueing a CapturedPair. Same loop-prevention rationale as
+        // handle_connect.
+        if self.cfg.is_bypassed(&host) {
+            debug!(host = %host, "bypass: forwarding plain HTTP without capture");
+            let (status, resp_headers, resp_body) = self
+                .forward(&head, &url, req_body)
+                .await
+                .map_err(|e| format!("bypass forward failed: {}", e))?;
+            write_http_response(&mut stream, status, &resp_headers, &resp_body).await?;
+            return Ok(());
+        }
+
         let (status, resp_headers, resp_body) =
             match self.forward(&head, &url, req_body.clone()).await {
                 Ok(v) => v,

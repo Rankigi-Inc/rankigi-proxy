@@ -32,6 +32,12 @@ pub struct Config {
     /// Off by default — server endpoint does not exist yet.
     pub seal_eval_enabled: bool,
     pub seal_eval_timeout_ms: u64,
+    /// Hosts that the proxy must NOT MITM, capture, or record. Always
+    /// includes the host parsed from `ingest_url` so that the proxy never
+    /// records its own ingest submissions (which would create a capture →
+    /// ingest → capture loop). Users can extend this list via
+    /// `RANKIGI_BYPASS_HOSTS` (comma-separated).
+    pub bypass_hosts: Vec<String>,
 }
 
 impl Config {
@@ -57,6 +63,25 @@ impl Config {
         let seal_eval_enabled = parse_env_or("RANKIGI_SEAL_EVAL_ENABLED", false)?;
         let seal_eval_timeout_ms = parse_env_or("RANKIGI_SEAL_EVAL_TIMEOUT_MS", 20u64)?;
 
+        // Bypass list: always includes the ingest URL host so the proxy
+        // never re-captures its own outbound submissions. Users may add
+        // additional hosts via RANKIGI_BYPASS_HOSTS (comma-separated).
+        let mut bypass_hosts: Vec<String> = Vec::new();
+        if let Some(host) = url::Url::parse(&ingest_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|s| s.to_ascii_lowercase()))
+        {
+            bypass_hosts.push(host);
+        }
+        if let Ok(extra) = env::var("RANKIGI_BYPASS_HOSTS") {
+            for h in extra.split(',') {
+                let trimmed = h.trim().trim_start_matches('.').to_ascii_lowercase();
+                if !trimmed.is_empty() && !bypass_hosts.contains(&trimmed) {
+                    bypass_hosts.push(trimmed);
+                }
+            }
+        }
+
         Ok(Self {
             proxy_port,
             ingest_url,
@@ -71,11 +96,18 @@ impl Config {
             passport_id,
             seal_eval_enabled,
             seal_eval_timeout_ms,
+            bypass_hosts,
         })
     }
 
     pub fn signing_enabled(&self) -> bool {
         self.passport_key.is_some() && self.passport_id.is_some()
+    }
+
+    /// Case-insensitive exact match against the bypass list.
+    pub fn is_bypassed(&self, host: &str) -> bool {
+        let h = host.trim_start_matches('.').to_ascii_lowercase();
+        self.bypass_hosts.iter().any(|b| *b == h)
     }
 }
 
