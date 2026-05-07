@@ -175,6 +175,14 @@ pub fn build_ingest_body(
         Value::String(seal_verdict.as_str().into()),
     );
 
+    // PII / secrets detection. Fail-open: timeout or error => null.
+    let detection_value =
+        match crate::detect::detect_pair(&pair.request_body, &pair.response_body) {
+            Some(d) => d.to_json(),
+            None => Value::Null,
+        };
+    decision_metadata.insert("detection".into(), detection_value);
+
     let payload = json!({
         "input_hash": input_hash,
         "output_hash": output_hash,

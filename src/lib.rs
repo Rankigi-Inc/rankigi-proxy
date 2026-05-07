@@ -1,5 +1,6 @@
 pub mod canonical_json;
 pub mod config;
+pub mod detect;
 pub mod event;
 pub mod gap;
 pub mod hash;
