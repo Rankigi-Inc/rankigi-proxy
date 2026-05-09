@@ -183,15 +183,17 @@ impl ProxyServer {
             if !read_until_headers_end(&mut tls_stream, &mut buf).await? {
                 return Ok(());
             }
-            let head = parse_request_head(&buf)?;
+            let mut head = parse_request_head(&buf)?;
             let received_at = Utc::now();
-            let (req_body, _) = read_body(&mut tls_stream, &buf, &head).await?;
+            let (req_body, req_truncated) = read_body(&mut tls_stream, &buf, &head).await?;
 
             let scheme = "https";
             let url = build_full_url(scheme, &host, port, &head.target);
             let path = path_from_target(&head.target);
 
-            let (status, resp_headers, resp_body) =
+            let req_body = self.maybe_stamp(&mut head, &host, &path, &url, req_body, req_truncated);
+
+            let (status, resp_headers, resp_body, resp_truncated) =
                 match self.forward(&head, &url, req_body.clone()).await {
                     Ok(v) => v,
                     Err(e) => {
@@ -206,7 +208,7 @@ impl ProxyServer {
                             response_body: Vec::new(),
                             proxy_received_at: received_at,
                             proxy_response_at: Some(Utc::now()),
-                            body_truncated: false,
+                            body_truncated: req_truncated,
                         };
                         let _ = self.queue.try_enqueue(QueueItem::Captured(Box::new(pair)));
                         return Err(e);
@@ -227,7 +229,7 @@ impl ProxyServer {
                 response_body: resp_body,
                 proxy_received_at: received_at,
                 proxy_response_at: Some(response_at),
-                body_truncated: false,
+                body_truncated: req_truncated || resp_truncated,
             };
             let _ = self.queue.try_enqueue(QueueItem::Captured(Box::new(pair)));
 
@@ -241,12 +243,12 @@ impl ProxyServer {
     async fn handle_plain(
         &self,
         mut stream: TcpStream,
-        head: RequestHead,
+        mut head: RequestHead,
         head_buf: Vec<u8>,
     ) -> Result<(), String> {
         // For plain HTTP via proxy the request line carries an absolute URL.
         let received_at = Utc::now();
-        let (req_body, _) = read_body(&mut stream, &head_buf, &head).await?;
+        let (req_body, req_truncated) = read_body(&mut stream, &head_buf, &head).await?;
 
         let absolute = head.target.clone();
         let parsed =
@@ -275,7 +277,7 @@ impl ProxyServer {
         // handle_connect.
         if self.cfg.is_bypassed(&host) {
             debug!(host = %host, "bypass: forwarding plain HTTP without capture");
-            let (status, resp_headers, resp_body) = self
+            let (status, resp_headers, resp_body, _) = self
                 .forward(&head, &url, req_body)
                 .await
                 .map_err(|e| format!("bypass forward failed: {}", e))?;
@@ -283,7 +285,9 @@ impl ProxyServer {
             return Ok(());
         }
 
-        let (status, resp_headers, resp_body) =
+        let req_body = self.maybe_stamp(&mut head, &host, &path, &url, req_body, req_truncated);
+
+        let (status, resp_headers, resp_body, resp_truncated) =
             match self.forward(&head, &url, req_body.clone()).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -297,7 +301,7 @@ impl ProxyServer {
                         response_body: Vec::new(),
                         proxy_received_at: received_at,
                         proxy_response_at: Some(Utc::now()),
-                        body_truncated: false,
+                        body_truncated: req_truncated,
                     };
                     let _ = self.queue.try_enqueue(QueueItem::Captured(Box::new(pair)));
                     return Err(e);
@@ -317,10 +321,58 @@ impl ProxyServer {
             response_body: resp_body,
             proxy_received_at: received_at,
             proxy_response_at: Some(response_at),
-            body_truncated: false,
+            body_truncated: req_truncated || resp_truncated,
         };
         let _ = self.queue.try_enqueue(QueueItem::Captured(Box::new(pair)));
         Ok(())
+    }
+
+    /// If the request matches a stamp pattern, weave a verifiable receipt
+    /// footer into the body, recompute Content-Length, and enqueue a
+    /// `stamp.issued` chain event. Returns the body to forward upstream
+    /// (modified if stamped, original otherwise). Never panics: stamp
+    /// errors fall back to forwarding the original body unmodified.
+    fn maybe_stamp(
+        &self,
+        head: &mut RequestHead,
+        host: &str,
+        path: &str,
+        url: &str,
+        body: Vec<u8>,
+        body_truncated: bool,
+    ) -> Vec<u8> {
+        let pattern = match crate::stamp::should_stamp(&self.cfg.stamp, host, path) {
+            Some(p) => p,
+            None => return body,
+        };
+
+        let receipt_id = uuid::Uuid::new_v4().to_string();
+        let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let verify_url = format!("{}/{}", self.cfg.stamp.verify_base_url, receipt_id);
+        let recipient_hash = crate::stamp::compute_recipient_hash(url);
+
+        let mut receipt = crate::stamp::StampReceipt {
+            receipt_id,
+            agent_id: self.cfg.agent_id.clone(),
+            timestamp,
+            body_hash: String::new(),
+            body_truncated,
+            recipient_hash,
+            verify_url,
+        };
+
+        let modified = crate::stamp::inject_footer(&body, &pattern.body_type, &receipt);
+        receipt.body_hash = crate::stamp::compute_body_hash(&modified);
+
+        update_content_length(&mut head.headers, modified.len());
+
+        let work = crate::queue::StampWork {
+            host: host.to_string(),
+            receipt,
+        };
+        let _ = self.queue.try_enqueue(QueueItem::Stamp(Box::new(work)));
+
+        modified
     }
 
     async fn forward(
@@ -328,7 +380,7 @@ impl ProxyServer {
         head: &RequestHead,
         url: &str,
         body: Vec<u8>,
-    ) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
+    ) -> Result<(u16, Vec<(String, String)>, Vec<u8>, bool), String> {
         let method = reqwest::Method::from_bytes(head.method.as_bytes())
             .map_err(|e| format!("bad method: {}", e))?;
         let mut req = self.upstream.request(method, url);
@@ -355,12 +407,13 @@ impl ProxyServer {
         }
         // Read body with a cap so we never OOM on a streaming response.
         let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-        let body = if bytes.len() > MAX_BODY_BYTES {
+        let resp_truncated = bytes.len() > MAX_BODY_BYTES;
+        let body = if resp_truncated {
             bytes[..MAX_BODY_BYTES].to_vec()
         } else {
             bytes.to_vec()
         };
-        Ok((status, headers, body))
+        Ok((status, headers, body, resp_truncated))
     }
 }
 
@@ -596,6 +649,19 @@ fn path_from_target(target: &str) -> String {
         p
     } else {
         target.to_string()
+    }
+}
+
+fn update_content_length(headers: &mut Vec<(String, String)>, new_len: usize) {
+    let mut updated = false;
+    for (k, v) in headers.iter_mut() {
+        if k.eq_ignore_ascii_case("content-length") {
+            *v = new_len.to_string();
+            updated = true;
+        }
+    }
+    if !updated {
+        headers.push(("content-length".to_string(), new_len.to_string()));
     }
 }
 

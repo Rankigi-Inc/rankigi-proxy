@@ -1,8 +1,50 @@
 //! Proxy configuration loaded from environment variables.
 
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 use thiserror::Error;
+
+/// How the stamp footer is woven into the request body for a given pattern.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StampBodyType {
+    /// Inject into a JSON field path (e.g. "raw" for Gmail's base64 MIME).
+    JsonField(String),
+    /// Insert before the closing `</body>` tag of an HTML document.
+    HtmlBody,
+    /// Append to the end of a plain-text body.
+    PlainText,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StampPattern {
+    pub host: String,
+    pub path_prefix: String,
+    pub body_type: StampBodyType,
+}
+
+#[derive(Debug, Clone)]
+pub struct StampConfig {
+    pub enabled: bool,
+    pub patterns: Vec<StampPattern>,
+    /// Public base URL for receipt resolution (no trailing slash).
+    pub verify_base_url: String,
+    /// If true, the proxy waits for the stamp event to land before forwarding
+    /// the modified request. Adds latency. V1: not implemented; reserved.
+    pub sync_anchor: bool,
+}
+
+impl Default for StampConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            patterns: Vec::new(),
+            verify_base_url: "https://rankigi.com/v".to_string(),
+            sync_anchor: false,
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -43,6 +85,10 @@ pub struct Config {
     /// `SO_ORIGINAL_DST` (Linux only) and the hostname via reverse DNS.
     /// Agents do NOT need `HTTPS_PROXY` set in this mode.
     pub transparent_mode: bool,
+    /// Stamp mode: when a request matches a pattern the proxy injects a
+    /// verifiable receipt footer into the request body and submits a
+    /// `stamp.issued` chain event. Disabled by default.
+    pub stamp: StampConfig,
 }
 
 impl Config {
@@ -88,6 +134,8 @@ impl Config {
             }
         }
 
+        let stamp = load_stamp_config()?;
+
         Ok(Self {
             proxy_port,
             ingest_url,
@@ -104,6 +152,7 @@ impl Config {
             seal_eval_timeout_ms,
             bypass_hosts,
             transparent_mode,
+            stamp,
         })
     }
 
@@ -135,4 +184,25 @@ where
             .map_err(|e| ConfigError::Invalid(name, e.to_string())),
         _ => Ok(default),
     }
+}
+
+fn load_stamp_config() -> Result<StampConfig, ConfigError> {
+    let enabled = parse_env_or("RANKIGI_STAMP_ENABLED", false)?;
+    let verify_base_url = env::var("RANKIGI_STAMP_VERIFY_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://rankigi.com/v".to_string());
+    let verify_base_url = verify_base_url.trim_end_matches('/').to_string();
+    let sync_anchor = parse_env_or("RANKIGI_STAMP_SYNC_ANCHOR", false)?;
+    let patterns = match env::var("RANKIGI_STAMP_PATTERNS") {
+        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str::<Vec<StampPattern>>(&raw)
+            .map_err(|e| ConfigError::Invalid("RANKIGI_STAMP_PATTERNS", e.to_string()))?,
+        _ => Vec::new(),
+    };
+    Ok(StampConfig {
+        enabled,
+        patterns,
+        verify_base_url,
+        sync_anchor,
+    })
 }

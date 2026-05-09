@@ -15,6 +15,7 @@ use crate::event::{build_ingest_body, CapturedPair, IngestBody};
 use crate::gap::build_gap_body;
 use crate::seal::evaluate_seal;
 use crate::signing::PassportSigner;
+use crate::stamp::{build_stamp_body, StampReceipt};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -24,6 +25,15 @@ use tracing::{error, info, warn};
 pub enum QueueItem {
     Captured(Box<CapturedPair>),
     Gap(GapReason),
+    Stamp(Box<StampWork>),
+}
+
+/// What the drainer needs to publish a stamp event. The host comes from the
+/// proxy hot path so the drainer does not need to re-derive it.
+#[derive(Debug)]
+pub struct StampWork {
+    pub host: String,
+    pub receipt: StampReceipt,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,9 +113,21 @@ impl Drainer {
                 QueueItem::Gap(reason) => {
                     self.handle_gap(reason).await;
                 }
+                QueueItem::Stamp(work) => {
+                    self.handle_stamp(*work).await;
+                }
             }
         }
         info!("ingest drainer shutting down");
+    }
+
+    async fn handle_stamp(&self, work: StampWork) {
+        let mut body = build_stamp_body(&self.cfg, &work.host, &work.receipt);
+        self.attach_signature(&mut body);
+        if !self.submit_with_retry(&body).await {
+            // Stamp lost: emit a gap so the chain shows the missing slot.
+            self.handle_gap(GapReason::IngestFailure).await;
+        }
     }
 
     async fn handle_captured(&self, pair: CapturedPair) {

@@ -8,6 +8,7 @@ pub mod proxy;
 pub mod queue;
 pub mod seal;
 pub mod signing;
+pub mod stamp;
 pub mod tls;
 
 pub use event::SealVerdictTag;

@@ -30,6 +30,7 @@ fn cfg(ingest_url: &str, buffer_size: usize) -> Arc<Config> {
         seal_eval_timeout_ms: 20,
         bypass_hosts: Vec::new(),
         transparent_mode: false,
+        stamp: Default::default(),
     })
 }
 
